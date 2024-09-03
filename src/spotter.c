@@ -230,9 +230,9 @@ void *start_sender(void *agentI) {
 	int tmpAttemptedHosts = 0;
 
 	if (aInfo->tPort[1] > aInfo->tPort[0]) {    //if we are scanning a set of port targets 
-		handle_scan_multi_ports(&s, &sin, iph, tcph, &psh, aInfo, mDatagram, &tmpAttemptedHosts);
+		handleScanMultiPorts(&s, &sin, iph, tcph, &psh, aInfo, mDatagram, &tmpAttemptedHosts);
 	} else { //if we scan a single port
-		handle_scan_single_port(&s, &sin, iph, tcph, &psh, aInfo, mDatagram, &tmpAttemptedHosts);
+		handleScanSinglePort(&s, &sin, iph, tcph, &psh, aInfo, mDatagram, &tmpAttemptedHosts);
 	}
 	//sleep(1);
 	endOfScan = TRUE;
