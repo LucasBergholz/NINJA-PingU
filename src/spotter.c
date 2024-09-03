@@ -96,6 +96,83 @@ void getMeATCPHeader(struct tcphdr *tcph, int mPort, int tPort) {
 	tcph->urg_ptr = 0;
 }
 
+// psh manipulation
+
+void changePsh(struct pseudo_header *psh, struct sockaddr_in sin, struct agentInfo *aInfo) {
+	psh->source_address = inet_addr(aInfo->mIp);
+	psh->dest_address = sin.sin_addr.s_addr;
+	psh->placeholder = 0;
+	psh->protocol = IPPROTO_TCP;
+	psh->tcp_length = htons(20);
+}
+
+void handleScanMultiPorts(int *s, struct sockaddr_in *sin, struct iphdr *iph, struct tcphdr *tcph, struct pseudo_header *psh, struct agentInfo *aInfo, char *mDatagram, int *tmpAttemptedHosts) {
+    int port = aInfo->tPort[0];
+    while (endOfScan == FALSE && ip != NULL && aInfo->run == TRUE) {
+        usleep(delay);
+        iph = (struct iphdr *) mDatagram;
+        sin->sin_port = htons(port);
+        sin->sin_addr.s_addr = inet_addr(ip);
+        iph->daddr = sin->sin_addr.s_addr;
+        iph->check = csum((unsigned short *) mDatagram, iph->tot_len >> 1);
+        getMeATCPHeader(tcph, aInfo->mPort, port);
+        psh->dest_address = sin->sin_addr.s_addr;
+        psh->tcp_length = htons(20);
+        memcpy(&psh->tcp, tcph, sizeof(struct tcphdr));
+        tcph->check = csum((unsigned short*) psh, sizeof(struct pseudo_header));
+
+        if (sendto(*s, mDatagram, iph->tot_len, 0, (struct sockaddr *) sin, sizeof(*sin)) < 0) {
+            //printf("error\n");
+        } else {
+            (*tmpAttemptedHosts)++;
+            if (*tmpAttemptedHosts >= CACHE_SYNC) {
+                incAttemptedHosts(*tmpAttemptedHosts);
+                *tmpAttemptedHosts = 0;
+            }
+        }
+        port++;
+        if (port > aInfo->tPort[1]) {
+            port = aInfo->tPort[0];
+            if (ip != NULL) {
+                free(ip);
+            }
+            pthread_mutex_lock(&sLock);
+            ip = getNext();
+            pthread_mutex_unlock(&sLock);
+        }
+    }
+}
+
+void handleScanSinglePort(int *s, struct sockaddr_in *sin, struct iphdr *iph, struct tcphdr *tcph, struct pseudo_header *psh, struct agentInfo *aInfo, char *mDatagram, int *tmpAttemptedHosts) {
+    while (endOfScan == FALSE && ip != NULL && aInfo->run == TRUE) {
+        usleep(delay);
+        sin->sin_addr.s_addr = inet_addr(ip);
+        iph->daddr = sin->sin_addr.s_addr;
+        iph->check = csum((unsigned short *) mDatagram, iph->tot_len >> 1);
+
+        psh->dest_address = sin->sin_addr.s_addr;
+        tcph->source = htons(aInfo->mPort);
+
+        tcph->check = csum((unsigned short*) psh, sizeof(struct pseudo_header));
+        if (sendto(*s, mDatagram, iph->tot_len, 0, (struct sockaddr *) sin, sizeof(*sin)) < 0) {
+            //printf("error\n");
+        } else {
+            (*tmpAttemptedHosts)++;
+            if (*tmpAttemptedHosts >= CACHE_SYNC) {
+                incAttemptedHosts(*tmpAttemptedHosts);
+                *tmpAttemptedHosts = 0;
+            }
+        }
+        if (ip != NULL) {
+            free(ip);
+        }
+        pthread_mutex_lock(&sLock);
+        ip = getNext();
+        pthread_mutex_unlock(&sLock);
+    }
+}
+
+
 void *start_sender(void *agentI) {
 	struct agentInfo *aInfo = agentI;
 
@@ -130,11 +207,7 @@ void *start_sender(void *agentI) {
 	//TCP Header
 	getMeATCPHeader(tcph, aInfo->mPort, aInfo->tPort[0]);
 
-	psh.source_address = inet_addr(aInfo->mIp);
-	psh.dest_address = sin.sin_addr.s_addr;
-	psh.placeholder = 0;
-	psh.protocol = IPPROTO_TCP;
-	psh.tcp_length = htons(20);
+	changePsh(&psh, sin, aInfo);
 
 	memcpy(&psh.tcp, tcph, sizeof(struct tcphdr));
 
@@ -157,69 +230,9 @@ void *start_sender(void *agentI) {
 	int tmpAttemptedHosts = 0;
 
 	if (aInfo->tPort[1] > aInfo->tPort[0]) {    //if we are scanning a set of port targets 
-		int port = aInfo->tPort[0];
-		while (endOfScan == FALSE && ip != NULL && aInfo->run == TRUE) {
-			usleep(delay);
-			iph = (struct iphdr *) mDatagram;
-			sin.sin_port = htons(port);
-			sin.sin_addr.s_addr = inet_addr(ip);
-			iph->daddr = sin.sin_addr.s_addr;
-			iph->check = csum((unsigned short *) mDatagram, iph->tot_len >> 1);			
-			getMeATCPHeader(tcph, aInfo->mPort, port);
-			psh.dest_address = sin.sin_addr.s_addr;
-			psh.tcp_length = htons(20);
-			memcpy(&psh.tcp, tcph, sizeof(struct tcphdr));
-			tcph->check = csum((unsigned short*) &psh, sizeof(struct pseudo_header));
-
-			if (sendto(s, mDatagram, iph->tot_len, 0, (struct sockaddr *) &sin, sizeof(sin)) < 0) {
-				//printf("error\n");
-			} else {
-				tmpAttemptedHosts++;
-				if (tmpAttemptedHosts >= CACHE_SYNC) {
-					incAttemptedHosts(tmpAttemptedHosts);
-					tmpAttemptedHosts = 0;
-				}
-			}
-			port++;
-			if (port > aInfo->tPort[1]) {
-				port = aInfo->tPort[0];
-				if (ip != NULL) {
-					free(ip);
-				}
-				pthread_mutex_lock (&sLock);
-				ip = getNext();
-				pthread_mutex_unlock(&sLock);
-			}
-
-		}
+		handle_scan_multi_ports(&s, &sin, iph, tcph, &psh, aInfo, mDatagram, &tmpAttemptedHosts);
 	} else { //if we scan a single port
-		while (endOfScan == FALSE && ip != NULL && aInfo->run == TRUE) {
-			usleep(delay);
-			sin.sin_addr.s_addr = inet_addr(ip);
-			iph->daddr = sin.sin_addr.s_addr;
-			iph->check = csum((unsigned short *) mDatagram, iph->tot_len >> 1);
-
-			psh.dest_address = sin.sin_addr.s_addr;
-			tcph->source = htons(aInfo->mPort);
-
-			tcph->check = csum((unsigned short*) &psh, sizeof(struct pseudo_header));
-			if (sendto(s, mDatagram, iph->tot_len, 0, (struct sockaddr *) &sin, sizeof(sin)) < 0) {
-				//printf("error\n");
-			} else {
-				tmpAttemptedHosts++;
-				if (tmpAttemptedHosts >= CACHE_SYNC) {
-					incAttemptedHosts(tmpAttemptedHosts);
-					tmpAttemptedHosts = 0;
-				}
-			}
-			if (ip != NULL) {
-				free(ip);
-			}
-			pthread_mutex_lock (&sLock);
-			ip = getNext();
-			pthread_mutex_unlock(&sLock);
-
-		}
+		handle_scan_single_port(&s, &sin, iph, tcph, &psh, aInfo, mDatagram, &tmpAttemptedHosts);
 	}
 	//sleep(1);
 	endOfScan = TRUE;
